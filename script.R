@@ -1,6 +1,13 @@
+#############################
+
 if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
 if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
 if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(purrr)
 
 #############################
 #DATA CLEANING
@@ -50,5 +57,194 @@ for (file in files) {
 rm(df, file, files, states) #removing dataframes I won't use
 clean_dataset <- filter(clean_dataset, id != '1') #removing the randon case I put in
 
+#translating the variable names
+names(clean_dataset) <- c('id', 'notification_date', 'first_symptom_date', 'conditions', 'sex', 'state', 'age', 'case_evolution')
+
+#detecting the more significant conditions, making it in a tidyer format 
+clean_dataset <- clean_dataset %>%
+  mutate(diabetes = if_else(str_detect(clean_dataset$conditions, 'Diabetes'), 'yes', 'no'),
+         cardiac = if_else(str_detect(clean_dataset$conditions, pattern = c('cardíacas', 'Cardoacas')), 'yes', 'no'),
+         respiratory = if_else(str_detect(clean_dataset$conditions, 'respiratórias'), 'yes', 'no'),
+         renal = if_else(str_detect(clean_dataset$conditions, 'renais'), 'yes', 'no'),
+         immunosuppression = if_else(str_detect(clean_dataset$conditions, 'Imunossupressão'), 'yes', 'no'),
+         pregnant = if_else(str_detect(clean_dataset$conditions, 'Gestante'), 'yes', 'no'),
+         chromosomal_abnormality = if_else(str_detect(clean_dataset$conditions, 'cromossômicas'), 'yes', 'no'))
+
+#a general comorbidities collum if any of the ones above is true, so will be this one
+clean_dataset <- clean_dataset %>%
+  mutate(comorbidities = if_else(diabetes == 'yes'|cardiac == 'yes'|respiratory == 'yes'|renal == 'yes'|
+                                immunosuppression == 'yes'|pregnant == 'yes'|chromosomal_abnormality =='yes', 'yes', 'no'))
+#remove the conditions collum since it was replaced for a tidyer format
+clean_dataset$conditions <- NULL
+
+#We can note that there is a couple weird ages, so I added a new filter to take only age <= 110
+clean_dataset <- filter(clean_dataset, age <= 110)
+
+#translating a couple variables to english
+clean_dataset$sex <- str_replace_all(clean_dataset$sex, 'Feminino', 'female')
+clean_dataset$sex <- str_replace_all(clean_dataset$sex, 'Masculino', 'male')
+clean_dataset$sex <- str_replace_all(clean_dataset$sex, 'Indefinido', 'null')
+
+clean_dataset$case_evolution <- str_replace_all(clean_dataset$case_evolution, 'Cura', 'cure')
+clean_dataset$case_evolution <- str_replace_all(clean_dataset$case_evolution, 'Óbito', 'decease')
+
 write.csv(clean_dataset, file = 'data\\clean_dataset.csv')#export the clean dataset so I can push it into GitHub
 
+#############################
+#DOWNLOAD, UNZIP AND LOAD clean_dataset
+
+url <- "https://raw.githubusercontent.com/rodrigues-pedro/COVID-19/master/data/clean_dataset.zip"
+temp <- tempfile()
+download.file(url, temp, mode="wb")
+unzip(temp, "clean_dataset.csv")
+clean_dataset <- read.csv("clean_dataset.csv")
+unlink(temp)
+
+clean_dataset$case_evolution <- factor(clean_dataset$case_evolution, levels = c('decease', 'cure'))
+#############################
+#DATA EXPLORATION
+#############################
+
+##BASE STATS
+sum(clean_dataset$case_evolution == 'decease') #Total of deaths in the dataset
+mean(clean_dataset$case_evolution == 'cure') #Percentage of cures in the dataset
+
+##AGE
+clean_dataset %>% ggplot(aes(case_evolution, age, fill = case_evolution)) +
+  geom_boxplot(alpha = 0.2)
+#now we note that the median age amongst the deceased cases is quite higher then the cured ones
+
+##SEX
+clean_dataset %>% ggplot(aes(case_evolution, fill = sex)) +
+  geom_bar(stat = 'count', position = 'fill') +
+  ylab('percentage')
+#slight prevalence of male other than females in the deceased group, not sure if statistically significant
+#deeper analysis later
+
+##STATE
+clean_dataset %>% group_by(state) %>% summarise(deceased = mean(case_evolution == 'decease'),
+                                                cured = mean(case_evolution == 'cure')) %>% view()
+#little to no variation in between states, don't think is influential
+
+##COMORBIDITIES
+clean_dataset %>% ggplot(aes(case_evolution, fill = comorbidities)) +
+  geom_bar(stat = 'count', position = 'fill') +
+  ylab('percentage')
+#here we note that the presence of comorbidities in general is much higher amongst the deceased cases
+
+clean_dataset %>% group_by(case_evolution) %>%
+  summarise(comorbidities = mean(comorbidities == 'yes'),
+            diabetes = mean(diabetes == 'yes'),
+            cardiac = mean(cardiac == 'yes'),
+            respiratory = mean(respiratory == 'yes'),
+            renal = mean(renal == 'yes'),
+            immunosuppression = mean(immunosuppression == 'yes'),
+            chromosomal_abnormality = mean(chromosomal_abnormality == 'yes'),
+            pregnant = mean(pregnant == 'yes'))
+#a little summary on the presence of the analysed comorbidities
+
+#############################
+#MACHINE LEARNING
+#############################
+
+##MODEL 1
+
+# validation set will be 10% of clean_dataset data
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+validation_index <- createDataPartition(y = clean_dataset$case_evolution, times = 1, p = 0.1, list = FALSE)
+remaining <- clean_dataset[-validation_index,]
+validation <- clean_dataset[validation_index,]
+
+# test set will be 10% of remaining data
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = remaining$case_evolution, times = 1, p = 0.1, list = FALSE)
+train <- clean_dataset[-test_index,]
+test <- clean_dataset[test_index,]
+
+#Since the goal is to predict the most vunerable cases, we are focusing on specifity for this algorithm
+#which is a potencial problem, since the number of deceased cases is very low compared to the cured ones
+
+#Here we fit a model to predict the probability of death, by age, as a linear model
+fit <- train %>%
+  mutate(y = ifelse(case_evolution == 'decease', 1, 0)) %>%
+  lm(y ~ age, data = .)
+#27.8 Case study: is it a 2 or a 7?#
+p_hat <- predict(fit, newdata = test)
+#conditional probabilities acording to age only
+
+#now we calculate conditional probabilities acording to the other variables
+#fatalitie probabilitie considering that there is one of the comorbidities
+p_diabetes <- train %>% filter(diabetes == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_cardiac <- train %>% filter(cardiac == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_respiratory <- train %>% filter(respiratory == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_renal <- train %>% filter(renal == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_immuno <- train %>% filter(immunosuppression == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_pregnant <- train %>% filter(pregnant == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_chrom <- train %>% filter(chromosomal_abnormality == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+
+#now we write a model that takes in consideration every one of this calculations:
+p <- seq(0,0,length.out = 35735)
+
+for (i in 1:length(p_hat)){
+  if(test$diabetes[i] == 'yes'){p[i] = p[i] + p_diabetes} #if there is diabetes, we add the p_diabetes to the general probability 
+  if(test$cardiac[i] == 'yes'){p[i] = p[i] + p_cardiac} #and so on for the other comobidities
+  if(test$respiratory[i] == 'yes'){p[i] = p[i] + p_respiratory}
+  if(test$renal[i] == 'yes'){p[i] = p[i] + p_renal}
+  if(test$immunosuppression[i] == 'yes'){p[i] = p[i] + p_immuno}
+  if(test$pregnant[i] == 'yes'){p[i] = p[i] + p_pregnant}
+  if(test$chromosomal_abnormality[i] == 'yes'){p[i] = p[i] + p_chrom}
+  p[i] = p[i] + p_hat[i]
+}
+
+#now, having the general probabilities we can tune for the optimal cuttof value using the balanced accuracy as measure
+#using balanced accuracy because sensitivity is very important, and due to the unbalenced of the dataset, it's generally quite low with high accuracy
+ps <- seq(0,1,0.01)
+
+accuracy <- sapply(ps, function(ps){
+  y_hat <- factor(ifelse(p > ps, 'decease', 'cure'))
+  b_a <- confusionMatrix(y_hat, test$case_evolution)$byClass[['Balanced Accuracy']]
+  b_a  
+  })
+
+best_p <- ps[which.max(accuracy)]
+
+##MODEL 1 - FINAL
+#now we can retrain everything using the remaining dataset but using the tuned values to check on the validation set
+
+#Here we fit a model to predict the probability of death, by age, as a linear model
+fit_fin <- remaining %>%
+  mutate(y = ifelse(case_evolution == 'decease', 1, 0)) %>%
+  lm(y ~ age, data = .)
+#27.8 Case study: is it a 2 or a 7?#
+p_hat_fin <- predict(fit_fin, newdata = validation)
+#conditional probabilities acording to age only
+
+#now we calculate conditional probabilities acording to the other variables
+#fatalitie probabilitie considering that there is one of the comorbidities
+p_diabetes_fin <- remaining %>% filter(diabetes == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_cardiac_fin <- remaining %>% filter(cardiac == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_respiratory_fin <- remaining %>% filter(respiratory == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_renal_fin <- remaining %>% filter(renal == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_immuno_fin <- remaining %>% filter(immunosuppression == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_pregnant_fin <- remaining %>% filter(pregnant == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+p_chrom_fin <- remaining %>% filter(chromosomal_abnormality == 'yes') %>% summarise(mean(case_evolution == 'decease')) %>% pull(.)
+
+#now we write a model that takes in consideration every one of this calculations:
+p_fin <- seq(0,0,length.out = 39705)
+
+for (i in 1:length(p_hat_fin)){
+  if(validation$diabetes[i] == 'yes'){p_fin[i] = p_fin[i] + p_diabetes_fin} #if there is diabetes, we add the p_diabetes to the general probability 
+  if(validation$cardiac[i] == 'yes'){p_fin[i] = p_fin[i] + p_cardiac_fin} #and so on for the other comobidities
+  if(validation$respiratory[i] == 'yes'){p_fin[i] = p_fin[i] + p_respiratory_fin}
+  if(validation$renal[i] == 'yes'){p_fin[i] = p_fin[i] + p_renal_fin}
+  if(validation$immunosuppression[i] == 'yes'){p_fin[i] = p_fin[i] + p_immuno_fin}
+  if(validation$pregnant[i] == 'yes'){p_fin[i] = p_fin[i] + p_pregnant_fin}
+  if(validation$chromosomal_abnormality[i] == 'yes'){p_fin[i] = p_fin[i] + p_chrom_fin}
+  p_fin[i] = p_fin[i] + p_hat_fin[i]
+}
+
+y_hat_fin <- factor(ifelse(p_fin > best_p, 'decease', 'cure'))
+confusionMatrix(y_hat_fin, validation$case_evolution)
+#since we couldn't tune for the best value of p we lost a little bit of accuracy here
