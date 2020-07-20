@@ -43,11 +43,12 @@ for (file in files) {
   clean_dataset <- bind_rows(clean_dataset, df)
 }
 
-write.csv(clean_dataset, file = 'data\\clean_dataset.csv')#export the clean dataset so I can push it into GitHub
 #this my take a while to run, I will put the clean dataset as a .csv on GitHub, make things easier
 #the raw files can be found on https://opendatasus.saude.gov.br/dataset/casos-nacionais in case you want to
 #due to size and number of files i won't be adding then on GitHub
 
 rm(df, file, files, states) #removing dataframes I won't use
 clean_dataset <- filter(clean_dataset, id != '1') #removing the randon case I put in
+
+write.csv(clean_dataset, file = 'data\\clean_dataset.csv')#export the clean dataset so I can push it into GitHub
 
