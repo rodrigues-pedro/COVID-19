@@ -1,13 +1,9 @@
 #############################
 
-if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
-if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
-if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
-
-library(tidyverse)
-library(caret)
-library(data.table)
-library(purrr)
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(caret)) install.packages("caret")
+if(!require(data.table)) install.packages("data.table")
+if(!require(klaR)) install.packages("klaR")
 
 #############################
 #DATA CLEANING
@@ -100,7 +96,12 @@ unzip(temp, "clean_dataset.csv")
 clean_dataset <- read.csv("clean_dataset.csv")
 unlink(temp)
 
+#change level order on the case_evolution since we're more concerned with the decease cases.
 clean_dataset$case_evolution <- factor(clean_dataset$case_evolution, levels = c('decease', 'cure'))
+
+#removing the columm added when writing the csv
+clean_dataset$X <- NULL
+
 #############################
 #DATA EXPLORATION
 #############################
@@ -108,6 +109,7 @@ clean_dataset$case_evolution <- factor(clean_dataset$case_evolution, levels = c(
 ##BASE STATS
 sum(clean_dataset$case_evolution == 'decease') #Total of deaths in the dataset
 mean(clean_dataset$case_evolution == 'cure') #Percentage of cures in the dataset
+# Class is totally imbalanced
 
 ##AGE
 clean_dataset %>% ggplot(aes(case_evolution, age, fill = case_evolution)) +
@@ -158,7 +160,7 @@ validation <- clean_dataset[validation_index,]
 
 # test set will be 10% of remaining data
 set.seed(1, sample.kind="Rounding")
-# if using R 3.5 or earlier, use `set.seed(1)` instead
+# if using R 3.5 or earlier, use set.seed(1)
 test_index <- createDataPartition(y = remaining$case_evolution, times = 1, p = 0.1, list = FALSE)
 train <- clean_dataset[-test_index,]
 test <- clean_dataset[test_index,]
@@ -217,7 +219,7 @@ best_p <- ps[which.max(accuracy)]
 fit_fin <- remaining %>%
   mutate(y = ifelse(case_evolution == 'decease', 1, 0)) %>%
   lm(y ~ age, data = .)
-#27.8 Case study: is it a 2 or a 7?#
+
 p_hat_fin <- predict(fit_fin, newdata = validation)
 #conditional probabilities acording to age only
 
@@ -248,3 +250,87 @@ for (i in 1:length(p_hat_fin)){
 y_hat_fin <- factor(ifelse(p_fin > best_p, 'decease', 'cure'))
 confusionMatrix(y_hat_fin, validation$case_evolution)
 #since we couldn't tune for the best value of p we lost a little bit of accuracy here
+
+##MODEL 2
+
+#Now we are going to make a smaller and less imbalanced dataset, since, due to its size, we can't quite do much
+
+train <- remaining %>% filter(case_evolution == 'decease')
+#take all the deceases
+
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use set.seed(1)
+temp <- sample_n(remaining %>% filter(case_evolution == 'cure'), size = nrow(train))
+#take the same number of the deceases, but only cures
+
+train <- add_row(train, temp)
+#add the two together
+
+#now we repeat the process with validation set to create test set:
+
+test <- validation %>% filter(case_evolution == 'decease')
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use set.seed(1)
+temp <- sample_n(remaining %>% filter(case_evolution == 'cure'), size = nrow(test))
+test <- add_row(test, temp)
+
+rm(temp) #remove tem set
+
+#train glm model and predict on test, take the balanced accuracy
+glm <- train(case_evolution ~ age + diabetes + cardiac + renal + respiratory + immunosuppression + pregnant + chromosomal_abnormality,
+             data = train, method = 'glm')
+glm_pred <- predict(glm, test)
+results <- data.frame('model' = "Generalized Linear Model", 
+                      'balanced_acc' = confusionMatrix(glm_pred, test$case_evolution)$byClass[['Balanced Accuracy']])
+
+#train knn and predict on test, take the balanced accuracy 
+knn <- train(case_evolution ~ age + diabetes + cardiac + renal + respiratory + immunosuppression + pregnant + chromosomal_abnormality,
+             data = train, method = 'knn')
+knn_pred <- predict(knn, test)
+results <- add_row(results, data.frame('model' = "k-Nearest Neighbors", 
+                      'balanced_acc' = confusionMatrix(knn_pred, test$case_evolution)$byClass[['Balanced Accuracy']]))
+
+#train rpart and predict on test, take the balanced accuracy
+rpart <- train(case_evolution ~ age + diabetes + cardiac + renal + respiratory + immunosuppression + pregnant + chromosomal_abnormality,
+             data = train, method = 'rpart')
+rpart_pred <- predict(rpart, test)
+results <- add_row(results, data.frame('model' = "Decision Tree", 
+                                       'balanced_acc' = confusionMatrix(rpart_pred, test$case_evolution)$byClass[['Balanced Accuracy']]))
+
+#Ensemble:
+ens1 <- if_else(glm_pred == 'cure' & knn_pred == 'cure' & rpart_pred == 'cure',
+                'cure', 'decease')
+#ensemble by only if all three say its a 'cure'
+ens1 <- factor(ens1, levels = levels(test$case_evolution))
+results <- add_row(results, data.frame('model' = "Ensemble - 1", 
+                                       'balanced_acc' = confusionMatrix(ens1, test$case_evolution)$byClass[['Balanced Accuracy']]))
+
+ens2 <- if_else(glm_pred == 'cure' & knn_pred == 'cure' |
+                  glm_pred == 'cure' & rpart_pred == 'cure' |
+                  rpart_pred == 'cure' & knn_pred == 'cure' ,
+                'cure', 'decease')
+#ensemble by marjority
+ens2 <- factor(ens2, levels = levels(test$case_evolution))
+results <- add_row(results, data.frame('model' = "Ensemble - 2", 
+                                       'balanced_acc' = confusionMatrix(ens2, test$case_evolution)$byClass[['Balanced Accuracy']]))
+
+results
+#as seen on results, the best balanced accuracy between the ensembles was achieved on the first ensemble, 
+#which will be the final model used on the validation set:
+
+##MODEL 2 - FINAL
+
+#make the final predictions on the validation set
+glm_pred_fin <- predict(glm, validation)
+knn_pred_fin <- predict(knn, validation)
+rpart_pred_fin <- predict(rpart, validation)
+
+ens <- if_else(glm_pred_fin == 'cure' & knn_pred_fin == 'cure' & rpart_pred_fin == 'cure',
+                'cure', 'decease')
+
+ens <- factor(ens, levels = levels(test$case_evolution))
+confusionMatrix(ens, validation$case_evolution)
+
+#Comparing to model 1 - final we improoved a little in regards to balanced accuracy, 
+#and in sensitivity, which, considering the nature of the data, is more important than the overall accuracy.
+#even though it wasn't the improovment I was expecting I still consider it valid, and satisfied me.
