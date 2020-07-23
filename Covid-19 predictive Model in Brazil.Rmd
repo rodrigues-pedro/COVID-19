@@ -1,0 +1,169 @@
+---
+title: "Covid-19 predictive Model in Brazil"
+author: "Pedro Rodrigues"
+date: "7/22/2020"
+output: 
+  pdf_document:
+    toc: true
+    number_sections: false
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(caret)) install.packages("caret")
+if(!require(data.table)) install.packages("data.table")
+if(!require(knitr)) install.packages("knitr")
+options(digits = 3)
+clean_dataset <- read.csv('clean_dataset.csv')
+clean_dataset$case_evolution <- factor(clean_dataset$case_evolution, levels = c('decease', 'cure'))
+clean_dataset$X <- NULL
+results <- read.csv('results.csv')
+finalresults <- read.csv('finalresults.csv')
+```
+
+***
+# Introduction
+
+Coronavirus Disease 2019 (COVID-19) is a viral respiratory disease that was declared as Pandemic by the World Health Organization (WHO) in March 11^{th}. Since then it has spreading quickly. As of mid July there still hasn't been found any definitive treatment or any vacine for the disease. Acttualy there's little established knowledge concerning Sars-Cov-2. 
+This exploratory analysis and predictive model come to try and help with that. Shed some light regarding the risk and prognosis of some Covid cases. Trying to create a system to choose cases that should be treated with bigger pryority pior to agravating in symptoms, leading to a  premature especial attention.
+
+
+# Methodology
+## Data
+We began with some open datasets on the notifications of coronavirus cases in Brazil. Available on the [openDatasus website](https://opendatasus.saude.gov.br/dataset/casos-nacionais) there is one dataset for each brazilian state, in which they added notitifications arising from the *e-SUS NOTIFICA* (e-(Unique Health System) NOTIFY), which was developed to record suspected Covid-19 and Influenza Syndrome cases. There is over 2.5 Gb worth of data, so there was quite a bit of data cleaning to do.  
+
+## Data Cleaning
+
+Begining with multiple csv files, and a lot of noise in my datasets I began with developing a function that would read all the files; filter to get only confirmed cases that had a definitive ending to then, patients who got cured, and patiets who passed away; select the usefull variables, in my understanding: 
+```{r names, echo=FALSE, message=FALSE, warning=FALSE}
+print(c('id', 'notification_date', 'first_symptom_date', 'conditions', 'sex', 'state', 'age', 'case_evolution'))
+```
+And finally add to a single dataset, the one we're going to use throughout this analysis: clean_dataset.
+After that I translated the variable names and factors used in the datasets from portuguese to english, making it easier to use in this report.
+Then I changed the Conditions column into a tidyer format, by taking each possible condition into it's own column, using factors that sad if it was present or not. And if summary variable that sad which any of the comorbidities were present.
+And finally I filtered out some weird ages, by setting the max age as 110 years old, since I had some over 300 years old polluting the dataset.
+After that I just exported a csv file and uploaded a compressed version of it into my [GitHub](https://github.com/rodrigues-pedro). There you have the final version of my dataset:
+```{r dataset, echo=FALSE, message=FALSE, warning=FALSE}
+str(clean_dataset)
+```
+
+## Data Exploration
+### General
+Now we can begin the data exploration, let's see the dimensions:
+```{r dimensions, echo=FALSE, message=FALSE, warning=FALSE}
+dim(clean_dataset)
+```
+
+First thing we note is how badly imbalanced the classes are:
+```{r class_imbalanced, echo=FALSE, message=FALSE, warning=FALSE}
+clean_dataset %>% group_by(case_evolution) %>% summarise(total = n(), percentage = n()/397048) %>% kable()
+```
+
+We are going to deal with this basically with tuning, using Balanced Accuracy as our main Performance Metric and in the final model we also undersample, by randomly excluding some cured observations
+
+### Age
+Here we look to see if there is any relationship between the age and the case evolution, simply a boxplot:
+```{r age, echo=FALSE, message=FALSE, warning=FALSE}
+clean_dataset %>% ggplot(aes(case_evolution, age, fill = case_evolution)) +
+  geom_boxplot(alpha = 0.5) 
+```
+
+There, it is notable that the median age amongst the deceased is quite higher than amongst the cured group. Which is something we are going to use in the models we are going to train.
+
+### State
+Took a look if there was any connections between the state and the case evolution. Since there are 28 states, there will be just the percentages of cure and deceased cases ahead:
+```{r state, echo=FALSE, message=FALSE, warning=FALSE}
+data <- clean_dataset %>% group_by(state) %>% 
+  summarise(deceased = mean(case_evolution == 'decease'),
+            cured = mean(case_evolution == 'cure')) 
+
+rows <- seq_len(nrow(data) %/% 2)
+
+kable(list(data[rows,1:3],  
+           matrix(numeric(), nrow=0, ncol=1),
+           data[-rows, 1:3]))
+```
+
+As noticible, there is little to no variation, I don't think it was going to be usefull.
+
+### Comorbidities
+The comorbidities, as I inicially suspected, are much more present in the deceased group than in the cured one:
+```{r comorbities, echo=FALSE, message=FALSE, warning=FALSE}
+clean_dataset %>% ggplot(aes(case_evolution, fill = comorbidities)) +
+  geom_bar(stat = 'count', position = 'fill') +
+  ylab('percentage')
+```
+
+We can also see the presence of each comorbidity:
+```{r comorbities-2, echo=FALSE, message=FALSE, warning=FALSE}
+data <- clean_dataset %>% group_by(case_evolution) %>%
+  summarise(comorbidities = mean(comorbidities == 'yes'),
+            diabetes = mean(diabetes == 'yes'),
+            cardiac = mean(cardiac == 'yes'),
+            respiratory = mean(respiratory == 'yes'),
+            renal = mean(renal == 'yes'),
+            immunosuppression = mean(immunosuppression == 'yes'),
+            chromosomal_abnormality = mean(chromosomal_abnormality == 'yes'),
+            pregnant = mean(pregnant == 'yes'))
+kable(data[,1:5])
+kable(data[,6:9])
+```
+
+## Machine Learning
+Splitted my dataset into train, test and validation datasets. Doing so that the validation is 10% of the total dataset and, at first the train and test was 90/10 of the remaining ones.
+
+### Model 1
+This was basically a ensemble between:
+- A linear model to estimate the probability of death, based on the age of the patient, following a model of the sorts: 
+$$p(age) = P(case \ evolution = decease \ | \ age = age) = \alpha + \beta age$$
+- Some bias calculation for each one of the comorbidities that was calculated trough conditional probability, using the formula:
+$$ p(comorbidity) = P(case \ evolution = decease \ | \ comorbidity = yes) = \frac{P(evolution = decease)}{P(comorbidity = yes)}$$
+This biases were then added to the probability of death estimated by age, leading to the final probabilities. Then, using a function to take the Balanced Accuracy and the test set we tuned for the best cutoff value for p, than we used that value on the final model, trained in the remaining set, and the final results on the validation set. 
+
+### Model 2
+
+Due to the size of the dataset, low power of my machine and class imbalance, I decided to reduce my train and test data sets by ignoring some of the cured cases, a technique called under-sampling. I did by taking all the deceased cases, than sampling the same amount of cured cases. Thus I had a perfect balanced dataset, and quite smaller as well.
+So I could easily train a Generalized Linear Model, a k-Nearest Neighbors, and a Decision Tree.
+Than I made two ensembles:
+- In the first one, I had then afirming decease if any of the three sad decease. Or only sad cure if every one of the three sad cure.
+- In the second one it would go by marjority.
+Compared the two in the test set, and the first one was more successfull, so thats the one I used on the Validation test set to get the final results.
+
+# Results
+
+## Model 1
+
+After tuning for the best cutoff value, I found that 0.05 would give me the best balanced accuracy:
+
+```{r model1_acc, echo=FALSE, message=FALSE, warning=FALSE}
+read.csv('acc_data.csv') %>% ggplot(aes(cutoff, balanced_accuracy))+
+  geom_point()
+```
+
+After that I retrained using the bigger dataset, and got the final result in the validation dataset:
+
+```{r model1_results, echo=FALSE, message=FALSE, warning=FALSE}
+confusionMatrix(finalresults$mod1pred, finalresults$ref)
+```
+
+## Model 2
+
+After training the methods on the test sets, I got this balanced accuracies:
+
+```{r model2_acc, echo=FALSE, message=FALSE, warning=FALSE}
+kable(results)
+```
+
+And in the validation test set, this were the results:
+
+```{r model2_results, echo=FALSE, message=FALSE, warning=FALSE}
+confusionMatrix(finalresults$mod2pred, finalresults$ref)
+```
+
+Comparing to model 1 - final we improoved a little in regards to balanced accuracy, and in sensitivity, which, considering the nature of the data, is more important than the overall accuracy. Even though it wasn't the improovment I was expecting I still consider it valid, and satisfied me.
+
+
+# Conclusion
+

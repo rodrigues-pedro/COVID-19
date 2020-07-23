@@ -107,13 +107,14 @@ clean_dataset$X <- NULL
 #############################
 
 ##BASE STATS
-sum(clean_dataset$case_evolution == 'decease') #Total of deaths in the dataset
-mean(clean_dataset$case_evolution == 'cure') #Percentage of cures in the dataset
+
+clean_dataset %>% group_by(case_evolution) %>% summarise(total = n(), percentage = n()/397048)
 # Class is totally imbalanced
 
 ##AGE
+
 clean_dataset %>% ggplot(aes(case_evolution, age, fill = case_evolution)) +
-  geom_boxplot(alpha = 0.2)
+  geom_boxplot(alpha = 0.5) 
 #now we note that the median age amongst the deceased cases is quite higher then the cured ones
 
 ##SEX
@@ -165,14 +166,11 @@ test_index <- createDataPartition(y = remaining$case_evolution, times = 1, p = 0
 train <- clean_dataset[-test_index,]
 test <- clean_dataset[test_index,]
 
-#Since the goal is to predict the most vunerable cases, we are focusing on specifity for this algorithm
-#which is a potencial problem, since the number of deceased cases is very low compared to the cured ones
-
 #Here we fit a model to predict the probability of death, by age, as a linear model
 fit <- train %>%
   mutate(y = ifelse(case_evolution == 'decease', 1, 0)) %>%
   lm(y ~ age, data = .)
-#27.8 Case study: is it a 2 or a 7?#
+
 p_hat <- predict(fit, newdata = test)
 #conditional probabilities acording to age only
 
@@ -209,6 +207,9 @@ accuracy <- sapply(ps, function(ps){
   b_a <- confusionMatrix(y_hat, test$case_evolution)$byClass[['Balanced Accuracy']]
   b_a  
   })
+
+data <- tibble(cutoff = ps, balanced_accuracy = accuracy)
+write.csv(data, "acc_data.csv")#write as an csv so I can use in the report
 
 best_p <- ps[which.max(accuracy)]
 
@@ -315,6 +316,7 @@ results <- add_row(results, data.frame('model' = "Ensemble - 2",
                                        'balanced_acc' = confusionMatrix(ens2, test$case_evolution)$byClass[['Balanced Accuracy']]))
 
 results
+write.csv(results, 'results.csv')
 #as seen on results, the best balanced accuracy between the ensembles was achieved on the first ensemble, 
 #which will be the final model used on the validation set:
 
@@ -334,3 +336,7 @@ confusionMatrix(ens, validation$case_evolution)
 #Comparing to model 1 - final we improoved a little in regards to balanced accuracy, 
 #and in sensitivity, which, considering the nature of the data, is more important than the overall accuracy.
 #even though it wasn't the improovment I was expecting I still consider it valid, and satisfied me.
+
+finalresults <- tibble(mod1pred = y_hat_fin, mod2pred = ens, ref = validation$case_evolution)
+write.csv(finalresults, 'finalresults.csv')
+#just exporting the final results so I can import in the report
